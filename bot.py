@@ -1228,43 +1228,4 @@ if __name__ == "__main__":
         )
     )
 
-    if __name__ == "__main__":
-
-    print("========== BOT START TEST ==========", flush=True)
-
-    import threading
-
-    thread = threading.Thread(
-        target=worker,
-        daemon=False
-    )
-
-    thread.start()
-
-    print(
-        "========== WORKER THREAD STARTED ==========",
-        flush=True
-    )
-
-    port = int(
-        os.getenv("PORT", "8080")
-    )
-
-    print(
-        f"========== WEB SERVER PORT: {port} ==========",
-        flush=True
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
-    log(
-        f"WEB SERVER STARTING "
-        f"ON PORT {port}"
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    

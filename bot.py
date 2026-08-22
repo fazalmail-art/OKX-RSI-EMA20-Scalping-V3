@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,38 +27,20 @@ MARGIN_USDT = Decimal(os.getenv("MARGIN_USDT", "20"))
 LEVERAGE = Decimal(os.getenv("LEVERAGE", "5"))
 TD_MODE = os.getenv("TD_MODE", "isolated")
 
-RSI_FAST = int(os.getenv("RSI_FAST", "14"))
-RSI_SLOW = int(os.getenv("RSI_SLOW", "100"))
-EMA_PERIOD = int(os.getenv("EMA_PERIOD", "20"))
-
 SL_PERCENT = Decimal(os.getenv("SL_PERCENT", "0.4"))
 TP_PERCENT = Decimal(os.getenv("TP_PERCENT", "0.8"))
 
-EMA_MODE = os.getenv("EMA_MODE", "true").lower() == "true"
-EMA_BUY_RSI_MAX = Decimal(os.getenv("EMA_BUY_RSI_MAX", "55"))
-EMA_SELL_RSI_MIN = Decimal(os.getenv("EMA_SELL_RSI_MIN", "45"))
-
-USE_ADX = os.getenv("USE_ADX", "true").lower() == "true"
-ADX_PERIOD = int(os.getenv("ADX_PERIOD", "14"))
 ADX_MIN = Decimal(os.getenv("ADX_MIN", "18"))
-
-USE_VOLUME = os.getenv("USE_VOLUME", "true").lower() == "true"
-VOLUME_PERIOD = int(os.getenv("VOLUME_PERIOD", "20"))
 VOLUME_MULT = Decimal(os.getenv("VOLUME_MULT", "0.8"))
-
-USE_ATR = os.getenv("USE_ATR", "true").lower() == "true"
-ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))
 ATR_MIN_PCT = Decimal(os.getenv("ATR_MIN_PCT", "0.05"))
 
-USE_15M_TREND = os.getenv("USE_15M_TREND", "true").lower() == "true"
-
 SYMBOLS = [
-    s.strip()
-    for s in os.getenv(
+    x.strip()
+    for x in os.getenv(
         "SYMBOLS",
         "BTC-USDT-SWAP,ETH-USDT-SWAP,XRP-USDT-SWAP,DOGE-USDT-SWAP"
     ).split(",")
-    if s.strip()
+    if x.strip()
 ]
 
 session = requests.Session()
@@ -74,33 +56,66 @@ def utc_iso():
     ).replace("+00:00", "Z")
 
 
-def sign(ts, method, path, body=""):
-    message = ts + method.upper() + path + body
+def sign(timestamp, method, path, body=""):
+    message = timestamp + method.upper() + path + body
+
     digest = hmac.new(
         SECRET_KEY.encode(),
         message.encode(),
         hashlib.sha256
     ).digest()
+
     return base64.b64encode(digest).decode()
 
 
+def public_get(path, params=None):
+    response = session.get(
+        BASE_URL + path,
+        params=params,
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("code") != "0":
+        raise RuntimeError(
+            f"OKX {data.get('code')}: {data.get('msg')}"
+        )
+
+    return data
+
+
 def private_request(method, path, payload=None, params=None):
+
     if not API_KEY or not SECRET_KEY or not PASSPHRASE:
-        raise RuntimeError("OKX API credentials are missing")
+        raise RuntimeError(
+            "OKX API credentials are missing"
+        )
 
-    body = json.dumps(
-        payload,
-        separators=(",", ":")
-    ) if payload else ""
+    body = (
+        json.dumps(
+            payload,
+            separators=(",", ":")
+        )
+        if payload
+        else ""
+    )
 
-    ts = utc_iso()
+    timestamp = utc_iso()
 
     headers = {
         "Content-Type": "application/json",
         "OK-ACCESS-KEY": API_KEY,
-        "OK-ACCESS-SIGN": sign(ts, method, path, body),
+        "OK-ACCESS-SIGN": sign(
+            timestamp,
+            method,
+            path,
+            body
+        ),
         "OK-ACCESS-PASSPHRASE": PASSPHRASE,
-        "OK-ACCESS-TIMESTAMP": ts
+        "OK-ACCESS-TIMESTAMP": timestamp
     }
 
     if DEMO:
@@ -116,6 +131,7 @@ def private_request(method, path, payload=None, params=None):
     )
 
     response.raise_for_status()
+
     data = response.json()
 
     if data.get("code") != "0":
@@ -126,77 +142,21 @@ def private_request(method, path, payload=None, params=None):
     return data
 
 
-def public_get(path, params=None):
-    response = session.get(
-        BASE_URL + path,
-        params=params,
-        timeout=15
-    )
+def get_candles(inst_id, bar=BAR, limit=160):
 
-    response.raise_for_status()
-    data = response.json()
-
-    if data.get("code") != "0":
-        raise RuntimeError(
-            f"OKX {data.get('code')}: {data.get('msg')}"
-        )
-
-    return data
-
-
-def get_instrument(inst_id):
-    if inst_id in instrument_cache:
-        return instrument_cache[inst_id]
-
-    rows = public_get(
-        "/api/v5/public/instruments",
-        {
-            "instType": "SWAP",
-            "instId": inst_id
-        }
-    )["data"]
-
-    if not rows:
-        raise RuntimeError(f"Instrument not found: {inst_id}")
-
-    x = rows[0]
-
-    info = {
-        "ctVal": Decimal(x["ctVal"]),
-        "ctValCcy": x["ctValCcy"],
-        "lotSz": Decimal(x["lotSz"]),
-        "minSz": Decimal(x["minSz"]),
-        "tickSz": Decimal(x["tickSz"])
-    }
-
-    instrument_cache[inst_id] = info
-    return info
-
-
-def round_down(value, step):
-    if step <= 0:
-        return value
-
-    return (
-        value / step
-    ).to_integral_value(
-        rounding=ROUND_DOWN
-    ) * step
-
-
-def get_candles(inst_id, bar="5m", limit=160):
-    rows = public_get(
+    data = public_get(
         "/api/v5/market/candles",
         {
             "instId": inst_id,
             "bar": bar,
             "limit": str(limit)
         }
-    )["data"]
+    )
 
     candles = []
 
-    for x in reversed(rows):
+    for x in reversed(data["data"]):
+
         candles.append({
             "ts": int(x[0]),
             "open": Decimal(x[1]),
@@ -210,7 +170,42 @@ def get_candles(inst_id, bar="5m", limit=160):
     return candles
 
 
-def rsi_series(values, period):
+def ema(values, period):
+
+    if len(values) < period:
+        return [None] * len(values)
+
+    result = [None] * len(values)
+
+    value = (
+        sum(
+            values[:period],
+            Decimal("0")
+        )
+        / Decimal(period)
+    )
+
+    result[period - 1] = value
+
+    multiplier = (
+        Decimal("2")
+        / Decimal(period + 1)
+    )
+
+    for i in range(period, len(values)):
+
+        value = (
+            values[i] * multiplier
+            + value * (Decimal("1") - multiplier)
+        )
+
+        result[i] = value
+
+    return result
+
+
+def rsi(values, period):
+
     result = [None] * len(values)
 
     if len(values) <= period:
@@ -220,132 +215,136 @@ def rsi_series(values, period):
     losses = []
 
     for i in range(1, len(values)):
-        diff = values[i] - values[i - 1]
 
-        gains.append(max(diff, Decimal("0")))
-        losses.append(max(-diff, Decimal("0")))
+        difference = (
+            values[i] - values[i - 1]
+        )
 
-    avg_gain = sum(
-        gains[:period],
-        Decimal("0")
-    ) / Decimal(period)
+        gains.append(
+            max(difference, Decimal("0"))
+        )
 
-    avg_loss = sum(
-        losses[:period],
-        Decimal("0")
-    ) / Decimal(period)
+        losses.append(
+            max(-difference, Decimal("0"))
+        )
 
-    def rsi_value(gain, loss):
+    average_gain = (
+        sum(gains[:period], Decimal("0"))
+        / Decimal(period)
+    )
+
+    average_loss = (
+        sum(losses[:period], Decimal("0"))
+        / Decimal(period)
+    )
+
+    def calculate(gain, loss):
+
         if loss == 0:
             return Decimal("100")
 
-        return Decimal("100") - (
-            Decimal("100") /
-            (Decimal("1") + gain / loss)
+        return (
+            Decimal("100")
+            - (
+                Decimal("100")
+                / (
+                    Decimal("1")
+                    + gain / loss
+                )
+            )
         )
 
-    result[period] = rsi_value(
-        avg_gain,
-        avg_loss
+    result[period] = calculate(
+        average_gain,
+        average_loss
     )
 
     for j in range(period, len(gains)):
-        avg_gain = (
-            (avg_gain * Decimal(period - 1))
+
+        average_gain = (
+            average_gain * (period - 1)
             + gains[j]
         ) / Decimal(period)
 
-        avg_loss = (
-            (avg_loss * Decimal(period - 1))
+        average_loss = (
+            average_loss * (period - 1)
             + losses[j]
         ) / Decimal(period)
 
-        result[j + 1] = rsi_value(
-            avg_gain,
-            avg_loss
+        result[j + 1] = calculate(
+            average_gain,
+            average_loss
         )
 
     return result
 
 
-def ema_series(values, period):
-    result = [None] * len(values)
+def atr(candles, period=14):
 
-    if len(values) < period:
-        return result
-
-    multiplier = Decimal("2") / Decimal(period + 1)
-
-    ema = sum(
-        values[:period],
-        Decimal("0")
-    ) / Decimal(period)
-
-    result[period - 1] = ema
-
-    for i in range(period, len(values)):
-        ema = (
-            values[i] * multiplier
-            + ema * (Decimal("1") - multiplier)
-        )
-
-        result[i] = ema
-
-    return result
-
-
-def atr_series(candles, period):
     result = [None] * len(candles)
 
     if len(candles) <= period:
         return result
 
-    tr = [None]
+    true_ranges = [None]
 
     for i in range(1, len(candles)):
+
         true_range = max(
-            candles[i]["high"] - candles[i]["low"],
+            candles[i]["high"]
+            - candles[i]["low"],
+
             abs(
                 candles[i]["high"]
                 - candles[i - 1]["close"]
             ),
+
             abs(
                 candles[i]["low"]
                 - candles[i - 1]["close"]
             )
         )
 
-        tr.append(true_range)
+        true_ranges.append(true_range)
 
-    atr = sum(
-        tr[1:period + 1],
-        Decimal("0")
-    ) / Decimal(period)
+    value = (
+        sum(
+            true_ranges[1:period + 1],
+            Decimal("0")
+        )
+        / Decimal(period)
+    )
 
-    result[period] = atr
+    result[period] = value
 
     for i in range(period + 1, len(candles)):
-        atr = (
-            (atr * Decimal(period - 1))
-            + tr[i]
+
+        value = (
+            value * (period - 1)
+            + true_ranges[i]
         ) / Decimal(period)
 
-        result[i] = atr
+        result[i] = value
 
     return result
 
 
-def adx_series(candles, period):
-    result = [None] * len(candles)
+def adx_simple(candles, period=14):
 
-    if len(candles) < 2 * period + 1:
-        return result
+    if len(candles) < period + 2:
+        return None
 
-    trs = [None] * len(candles)
-    plus_dm = [None] * len(candles)
-    minus_dm = [None] * len(candles)
+    upward = Decimal("0")
+    downward = Decimal("0")
+    ranges = Decimal("0")
 
-    for i in range(1, len(candles)):
+    start = max(
+        1,
+        len(candles) - period
+    )
+
+    for i in range(start, len(candles)):
+
         up_move = (
             candles[i]["high"]
             - candles[i - 1]["high"]
@@ -356,153 +355,109 @@ def adx_series(candles, period):
             - candles[i]["low"]
         )
 
-        trs[i] = max(
+        if (
+            up_move > down_move
+            and up_move > 0
+        ):
+            upward += up_move
+
+        if (
+            down_move > up_move
+            and down_move > 0
+        ):
+            downward += down_move
+
+        ranges += (
             candles[i]["high"]
-            - candles[i]["low"],
-            abs(
-                candles[i]["high"]
-                - candles[i - 1]["close"]
-            ),
-            abs(
-                candles[i]["low"]
-                - candles[i - 1]["close"]
-            )
+            - candles[i]["low"]
         )
 
-        plus_dm[i] = (
-            up_move
-            if up_move > down_move and up_move > 0
-            else Decimal("0")
-        )
+    if ranges == 0:
+        return Decimal("0")
 
-        minus_dm[i] = (
-            down_move
-            if down_move > up_move and down_move > 0
-            else Decimal("0")
-        )
+    plus_di = (
+        upward / ranges * Decimal("100")
+    )
 
-    atr = sum(
-        trs[1:period + 1],
-        Decimal("0")
-    ) / Decimal(period)
+    minus_di = (
+        downward / ranges * Decimal("100")
+    )
 
-    plus = sum(
-        plus_dm[1:period + 1],
-        Decimal("0")
-    ) / Decimal(period)
+    total = plus_di + minus_di
 
-    minus = sum(
-        minus_dm[1:period + 1],
-        Decimal("0")
-    ) / Decimal(period)
+    if total == 0:
+        return Decimal("0")
 
-    dx_values = []
-
-    for i in range(period, len(candles)):
-        if i > period:
-            atr = (
-                atr * Decimal(period - 1)
-                + trs[i]
-            ) / Decimal(period)
-
-            plus = (
-                plus * Decimal(period - 1)
-                + plus_dm[i]
-            ) / Decimal(period)
-
-            minus = (
-                minus * Decimal(period - 1)
-                + minus_dm[i]
-            ) / Decimal(period)
-
-        plus_di = (
-            Decimal("100") * plus / atr
-            if atr else Decimal("0")
-        )
-
-        minus_di = (
-            Decimal("100") * minus / atr
-            if atr else Decimal("0")
-        )
-
-        denominator = plus_di + minus_di
-
-        dx = (
-            Decimal("100")
-            * abs(plus_di - minus_di)
-            / denominator
-            if denominator
-            else Decimal("0")
-        )
-
-        dx_values.append(dx)
-
-        if len(dx_values) >= period:
-            result[i] = (
-                sum(
-                    dx_values[-period:],
-                    Decimal("0")
-                )
-                / Decimal(period)
-            )
-
-    return result
+    return (
+        abs(plus_di - minus_di)
+        / total
+        * Decimal("100")
+    )
 
 
-def trend_direction(candles):
+def get_15m_trend(symbol):
+
+    candles = get_candles(
+        symbol,
+        TREND_BAR,
+        80
+    )
+
     candles = [
         x for x in candles
         if x["confirm"] == "1"
     ]
 
-    if len(candles) < EMA_PERIOD + 2:
-        return None
+    if len(candles) < 22:
+        return "flat"
 
     closes = [
         x["close"]
         for x in candles
     ]
 
-    ema = ema_series(
+    ema_values = ema(
         closes,
-        EMA_PERIOD
+        20
     )
 
     i = len(candles) - 1
 
-    if ema[i] is None:
-        return None
+    if (
+        ema_values[i] is None
+        or ema_values[i - 1] is None
+    ):
+        return "flat"
 
     if (
-        closes[i] > ema[i]
-        and ema[i] > ema[i - 1]
+        closes[i] > ema_values[i]
+        and ema_values[i] > ema_values[i - 1]
     ):
         return "bull"
 
     if (
-        closes[i] < ema[i]
-        and ema[i] < ema[i - 1]
+        closes[i] < ema_values[i]
+        and ema_values[i] < ema_values[i - 1]
     ):
         return "bear"
 
     return "flat"
 
 
-def calculate_signal(candles, trend15=None):
+def calculate_signal(symbol):
+
+    candles = get_candles(
+        symbol,
+        BAR,
+        160
+    )
+
     candles = [
         x for x in candles
         if x["confirm"] == "1"
     ]
 
-    required = max(
-        RSI_SLOW,
-        EMA_PERIOD,
-        VOLUME_PERIOD,
-        ATR_PERIOD,
-        ADX_PERIOD
-    ) + 5
-
-    if len(candles) < required:
+    if len(candles) < 105:
         return None
 
     closes = [
@@ -510,128 +465,132 @@ def calculate_signal(candles, trend15=None):
         for x in candles
     ]
 
+    rsi14 = rsi(
+        closes,
+        14
+    )
+
+    rsi100 = rsi(
+        closes,
+        100
+    )
+
+    ema20 = ema(
+        closes,
+        20
+    )
+
+    atr_values = atr(
+        candles,
+        14
+    )
+
+    adx = adx_simple(
+        candles,
+        14
+    )
+
     i = len(candles) - 1
 
-    rsi14 = rsi_series(
-        closes,
-        RSI_FAST
-    )
-
-    rsi100 = rsi_series(
-        closes,
-        RSI_SLOW
-    )
-
-    ema20 = ema_series(
-        closes,
-        EMA_PERIOD
-    )
-
-    atr = atr_series(
-        candles,
-        ATR_PERIOD
-    )
-
-    adx = adx_series(
-        candles,
-        ADX_PERIOD
-    )
-
-    if any(
-        value[i] is None
-        or value[i - 1] is None
-        for value in (
-            rsi14,
-            rsi100,
-            ema20
-        )
+    if (
+        rsi14[i] is None
+        or rsi14[i - 1] is None
+        or rsi100[i] is None
+        or rsi100[i - 1] is None
+        or ema20[i] is None
+        or ema20[i - 1] is None
+        or atr_values[i] is None
+        or adx is None
     ):
         return None
+
+    buy_rsi = (
+        rsi14[i - 1] <= rsi100[i - 1]
+        and rsi14[i] > rsi100[i]
+    )
+
+    sell_rsi = (
+        rsi14[i - 1] >= rsi100[i - 1]
+        and rsi14[i] < rsi100[i]
+    )
+
+    buy_ema = (
+        closes[i - 1] <= ema20[i - 1]
+        and closes[i] > ema20[i]
+        and rsi14[i] <= 55
+    )
+
+    sell_ema = (
+        closes[i - 1] >= ema20[i - 1]
+        and closes[i] < ema20[i]
+        and rsi14[i] >= 45
+    )
 
     signal = None
     reason = None
 
-    # RSI 14/100 primary signal
-    if (
-        rsi14[i - 1] <= rsi100[i - 1]
-        and rsi14[i] > rsi100[i]
-    ):
+    if buy_rsi:
         signal = "buy"
         reason = "RSI_CROSS"
 
-    elif (
-        rsi14[i - 1] >= rsi100[i - 1]
-        and rsi14[i] < rsi100[i]
-    ):
+    elif sell_rsi:
         signal = "sell"
         reason = "RSI_CROSS"
 
-    # EMA20 alternative signal
-    if signal is None and EMA_MODE:
+    elif buy_ema:
+        signal = "buy"
+        reason = "EMA20"
 
-        if (
-            closes[i - 1] <= ema20[i - 1]
-            and closes[i] > ema20[i]
-            and rsi14[i] <= EMA_BUY_RSI_MAX
-        ):
-            signal = "buy"
-            reason = "EMA20_RECLAIM"
-
-        elif (
-            closes[i - 1] >= ema20[i - 1]
-            and closes[i] < ema20[i]
-            and rsi14[i] >= EMA_SELL_RSI_MIN
-        ):
-            signal = "sell"
-            reason = "EMA20_REJECTION"
+    elif sell_ema:
+        signal = "sell"
+        reason = "EMA20"
 
     if signal is None:
         return None
 
-    # 15-minute confirmation
-    if USE_15M_TREND:
-        if trend15 == "bull" and signal != "buy":
-            return None
-
-        if trend15 == "bear" and signal != "sell":
-            return None
-
-    # ADX
-    if USE_ADX:
-        if adx[i] is None or adx[i] < ADX_MIN:
-            return None
-
-    # Volume
-    if USE_VOLUME:
-        average_volume = (
-            sum(
-                x["volume"]
-                for x in candles[
-                    -(VOLUME_PERIOD + 1):-1
-                ]
-            )
-            / Decimal(VOLUME_PERIOD)
+    average_volume = (
+        sum(
+            x["volume"]
+            for x in candles[-21:-1]
         )
+        / Decimal("20")
+    )
 
-        if (
-            candles[i]["volume"]
-            < average_volume * VOLUME_MULT
-        ):
-            return None
+    volume_ok = (
+        candles[i]["volume"]
+        >= average_volume * VOLUME_MULT
+    )
 
-    # ATR
-    if USE_ATR:
-        if atr[i] is None:
-            return None
+    atr_percent = (
+        atr_values[i]
+        / closes[i]
+        * Decimal("100")
+    )
 
-        atr_percent = (
-            atr[i]
-            / closes[i]
-            * Decimal("100")
-        )
+    if adx < ADX_MIN:
+        return None
 
-        if atr_percent < ATR_MIN_PCT:
-            return None
+    if not volume_ok:
+        return None
+
+    if atr_percent < ATR_MIN_PCT:
+        return None
+
+    trend = get_15m_trend(
+        symbol
+    )
+
+    if (
+        trend == "bull"
+        and signal != "buy"
+    ):
+        return None
+
+    if (
+        trend == "bear"
+        and signal != "sell"
+    ):
+        return None
 
     return {
         "signal": signal,
@@ -640,26 +599,59 @@ def calculate_signal(candles, trend15=None):
         "rsi14": rsi14[i],
         "rsi100": rsi100[i],
         "ema20": ema20[i],
-        "adx": adx[i],
-        "atr": atr[i],
-        "trend15": trend15
+        "adx": adx,
+        "atr": atr_values[i],
+        "trend15": trend
     }
 
 
-def get_positions(inst_id):
-    rows = private_request(
-        "GET",
-        "/api/v5/account/positions",
-        params={"instId": inst_id}
-    )["data"]
+def get_instrument(inst_id):
 
-    return [
-        p for p in rows
-        if Decimal(p.get("pos", "0")) != 0
-    ]
+    if inst_id in instrument_cache:
+        return instrument_cache[inst_id]
+
+    data = public_get(
+        "/api/v5/public/instruments",
+        {
+            "instType": "SWAP",
+            "instId": inst_id
+        }
+    )
+
+    if not data["data"]:
+        raise RuntimeError(
+            f"Instrument not found: {inst_id}"
+        )
+
+    item = data["data"][0]
+
+    info = {
+        "ctVal": Decimal(item["ctVal"]),
+        "ctValCcy": item["ctValCcy"],
+        "lotSz": Decimal(item["lotSz"]),
+        "minSz": Decimal(item["minSz"]),
+        "tickSz": Decimal(item["tickSz"])
+    }
+
+    instrument_cache[inst_id] = info
+
+    return info
+
+
+def round_down(value, step):
+
+    if step <= 0:
+        return value
+
+    return (
+        value / step
+    ).to_integral_value(
+        rounding=ROUND_DOWN
+    ) * step
 
 
 def set_leverage(inst_id):
+
     return private_request(
         "POST",
         "/api/v5/account/set-leverage",
@@ -671,22 +663,34 @@ def set_leverage(inst_id):
     )
 
 
-def contract_size(inst_id, entry):
-    info = get_instrument(inst_id)
+def get_position_size(
+    inst_id,
+    price
+):
 
-    if info["ctValCcy"].upper() == "USDT":
-        value_per_contract = info["ctVal"]
+    info = get_instrument(
+        inst_id
+    )
+
+    if (
+        info["ctValCcy"].upper()
+        == "USDT"
+    ):
+        contract_value = info["ctVal"]
+
     else:
-        value_per_contract = (
-            info["ctVal"] * entry
+        contract_value = (
+            info["ctVal"]
+            * price
         )
 
-    target_position = (
-        MARGIN_USDT * LEVERAGE
+    target_value = (
+        MARGIN_USDT
+        * LEVERAGE
     )
 
     size = round_down(
-        target_position / value_per_contract,
+        target_value / contract_value,
         info["lotSz"]
     )
 
@@ -696,25 +700,84 @@ def contract_size(inst_id, entry):
     )
 
 
-def open_position(inst_id, signal):
+def get_positions(inst_id):
+
+    data = private_request(
+        "GET",
+        "/api/v5/account/positions",
+        params={
+            "instId": inst_id
+        }
+    )
+
+    return [
+        position
+        for position in data["data"]
+        if Decimal(
+            position.get(
+                "pos",
+                "0"
+            )
+        ) != 0
+    ]
+
+
+def close_position(
+    inst_id,
+    position
+):
+
+    if position["posSide"] == "long":
+        side = "sell"
+    else:
+        side = "buy"
+
+    return private_request(
+        "POST",
+        "/api/v5/trade/order",
+        {
+            "instId": inst_id,
+            "tdMode": TD_MODE,
+            "side": side,
+            "posSide": position["posSide"],
+            "ordType": "market",
+            "sz": position["pos"],
+            "reduceOnly": "true"
+        }
+    )
+
+
+def open_position(
+    symbol,
+    signal
+):
+
     entry = signal["entry"]
 
-    info = get_instrument(inst_id)
+    info = get_instrument(
+        symbol
+    )
 
-    size = contract_size(
-        inst_id,
+    size = get_position_size(
+        symbol,
         entry
     )
 
-    set_leverage(inst_id)
+    set_leverage(
+        symbol
+    )
 
     if signal["signal"] == "buy":
 
+        side = "buy"
+        pos_side = "long"
+
         sl = (
             entry
             * (
                 Decimal("1")
-                - SL_PERCENT / Decimal("100")
+                - SL_PERCENT
+                / Decimal("100")
             )
         )
 
@@ -722,20 +785,22 @@ def open_position(inst_id, signal):
             entry
             * (
                 Decimal("1")
-                + TP_PERCENT / Decimal("100")
+                + TP_PERCENT
+                / Decimal("100")
             )
         )
-
-        side = "buy"
-        position_side = "long"
 
     else:
 
+        side = "sell"
+        pos_side = "short"
+
         sl = (
             entry
             * (
                 Decimal("1")
-                + SL_PERCENT / Decimal("100")
+                + SL_PERCENT
+                / Decimal("100")
             )
         )
 
@@ -743,12 +808,10 @@ def open_position(inst_id, signal):
             entry
             * (
                 Decimal("1")
-                - TP_PERCENT / Decimal("100")
+                - TP_PERCENT
+                / Decimal("100")
             )
         )
-
-        side = "sell"
-        position_side = "short"
 
     sl = round_down(
         sl,
@@ -761,15 +824,19 @@ def open_position(inst_id, signal):
     )
 
     order = {
-        "instId": inst_id,
+        "instId": symbol,
         "tdMode": TD_MODE,
         "side": side,
-        "posSide": position_side,
+        "posSide": pos_side,
         "ordType": "market",
         "sz": str(size),
         "clOrdId": (
             "v3"
-            + str(int(time.time() * 1000))
+            + str(
+                int(
+                    time.time() * 1000
+                )
+            )
         )[-32:],
         "attachAlgoOrds": [
             {
@@ -791,98 +858,103 @@ def open_position(inst_id, signal):
 
     return {
         "status": "opened",
+        "symbol": symbol,
         "signal": signal["signal"],
         "reason": signal["reason"],
         "entry": str(entry),
         "sl": str(sl),
         "tp": str(tp),
         "size": str(size),
-        "position": position_side,
         "result": result
     }
 
 
-def close_position(inst_id, position):
-    side = (
-        "sell"
-        if position["posSide"] == "long"
-        else "buy"
+def execute(
+    symbol,
+    signal
+):
+
+    positions = get_positions(
+        symbol
     )
 
-    return private_request(
-        "POST",
-        "/api/v5/trade/order",
-        {
-            "instId": inst_id,
-            "tdMode": TD_MODE,
-            "side": side,
-            "posSide": position["posSide"],
-            "ordType": "market",
-            "sz": position["pos"],
-            "reduceOnly": "true"
-        }
-    )
-
-
-def execute(inst_id, signal):
-    positions = get_positions(inst_id)
-
-    desired = (
+    wanted = (
         "long"
         if signal["signal"] == "buy"
         else "short"
     )
 
     if any(
-        p["posSide"] == desired
-        for p in positions
+        position["posSide"] == wanted
+        for position in positions
     ):
         return {
             "status": "ignored",
-            "message": "Already in desired direction"
+            "message": (
+                "Position already open"
+            )
         }
 
     for position in positions:
+
         close_position(
-            inst_id,
+            symbol,
             position
         )
 
     return open_position(
-        inst_id,
+        symbol,
         signal
     )
 
 
+@app.get("/")
+def home():
+
+    return jsonify({
+        "bot": (
+            "OKX RSI EMA20 ADX ATR "
+            "Volume Scalping V3"
+        ),
+        "status": "running",
+        "demo": DEMO
+    })
+
+
 @app.get("/health")
 def health():
+
     return jsonify({
         "ok": True,
         "demo": DEMO,
+        "margin_usdt": str(
+            MARGIN_USDT
+        ),
+        "leverage": str(
+            LEVERAGE
+        ),
+        "sl_percent": str(
+            SL_PERCENT
+        ),
+        "tp_percent": str(
+            TP_PERCENT
+        ),
         "symbols": SYMBOLS,
-        "timeframe": BAR,
-        "trend_timeframe": TREND_BAR,
-        "margin": str(MARGIN_USDT),
-        "leverage": str(LEVERAGE),
-        "sl": str(SL_PERCENT),
-        "tp": str(TP_PERCENT),
-        "adx_min": str(ADX_MIN),
-        "volume_multiplier": str(VOLUME_MULT),
-        "atr_min_percent": str(ATR_MIN_PCT),
-        "ema20": EMA_MODE,
-        "15m_confirmation": USE_15M_TREND
+        "bar": BAR,
+        "trend_bar": TREND_BAR
     })
 
 
 def worker():
 
     print(
-        "OKX RSI + EMA20 + ADX + ATR + Volume V3 started"
+        "OKX RSI + EMA20 + ADX + ATR "
+        "+ Volume V3 started"
     )
 
     print(
-        f"Demo={DEMO} "
-        f"Margin=${MARGIN_USDT} "
+        f"Demo={DEMO}, "
+        f"Margin=${MARGIN_USDT}, "
         f"Leverage={LEVERAGE}x"
     )
 
@@ -899,57 +971,82 @@ def worker():
                 )
 
                 confirmed = [
-                    x for x in candles
-                    if x["confirm"] == "1"
+                    candle
+                    for candle in candles
+                    if candle["confirm"] == "1"
                 ]
 
                 if not confirmed:
                     continue
 
-                candle_time = confirmed[-1]["ts"]
+                candle_time = (
+                    confirmed[-1]["ts"]
+                )
 
-                if last_candle.get(symbol) == candle_time:
+                if (
+                    last_candle.get(symbol)
+                    == candle_time
+                ):
                     continue
 
-                last_candle[symbol] = candle_time
-
-                if USE_15M_TREND:
-
-                    trend15 = trend_direction(
-                        get_candles(
-                            symbol,
-                            TREND_BAR,
-                            80
-                        )
-                    )
-
-                else:
-                    trend15 = None
+                last_candle[symbol] = (
+                    candle_time
+                )
 
                 signal = calculate_signal(
-                    candles,
-                    trend15
+                    symbol
                 )
 
                 if signal:
 
-    print(
-        f"{datetime.now()} "
-        f"{symbol}: "
-        f"{signal['signal'].upper()} "
-        f"[{signal['reason']}] "
-        f"ADX={signal['adx']} "
-        f"Trend15={signal['trend15']}"
-    )
+                    print(
+                        f"{datetime.now()} "
+                        f"{symbol}: "
+                        f"{signal['signal'].upper()} "
+                        f"[{signal['reason']}] "
+                        f"ADX={signal['adx']} "
+                        f"Trend15={signal['trend15']}"
+                    )
 
-    result = execute(
-        symbol,
-        signal
-    )
+                    result = execute(
+                        symbol,
+                        signal
+                    )
 
-    print(
-        json.dumps(
-            result,
-            default=str
+                    print(
+                        json.dumps(
+                            result,
+                            default=str
+                        )
+                    )
+
+            except Exception as error:
+
+                print(
+                    f"[{symbol}] ERROR: "
+                    f"{error}"
+                )
+
+        time.sleep(
+            POLL_SECONDS
         )
-)
+
+
+if __name__ == "__main__":
+
+    import threading
+
+    threading.Thread(
+        target=worker,
+        daemon=True
+    ).start()
+
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.getenv(
+                "PORT",
+                "8080"
+            )
+        )
+    )

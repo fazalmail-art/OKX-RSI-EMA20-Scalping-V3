@@ -1,69 +1,104 @@
-import os
+ import os
 import time
 import json
 import hmac
 import base64
 import hashlib
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone
 
 import requests
 from flask import Flask, jsonify
 from dotenv import load_dotenv
 
-load_dotenv()
 
 # =========================================================
-# SETTINGS
+# LOAD ENVIRONMENT
+# =========================================================
+
+load_dotenv()
+
+
+# =========================================================
+# OKX SETTINGS
 # =========================================================
 
 BASE_URL = os.getenv(
     "OKX_BASE_URL",
-    "https://www.okx.com"
+    "https://openapi.okx.com"
 )
 
-API_KEY = os.getenv("OKX_API_KEY", "")
-SECRET_KEY = os.getenv("OKX_SECRET_KEY", "")
-PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
+API_KEY = os.getenv(
+    "OKX_API_KEY",
+    ""
+)
 
-DEMO = os.getenv(
-    "OKX_DEMO",
-    "true"
-).lower() == "true"
+SECRET_KEY = os.getenv(
+    "OKX_SECRET_KEY",
+    ""
+)
 
-BAR = os.getenv("BAR", "5m")
-TREND_BAR = os.getenv("TREND_BAR", "15m")
+PASSPHRASE = os.getenv(
+    "OKX_PASSPHRASE",
+    ""
+)
+
+DEMO = (
+    os.getenv(
+        "OKX_DEMO",
+        "true"
+    ).lower()
+    == "true"
+)
+
+
+# =========================================================
+# TRADING SETTINGS
+# =========================================================
 
 MARGIN_USDT = Decimal(
-    os.getenv("MARGIN_USDT", "20")
+    os.getenv(
+        "MARGIN_USDT",
+        "20"
+    )
 )
 
 LEVERAGE = Decimal(
-    os.getenv("LEVERAGE", "5")
+    os.getenv(
+        "LEVERAGE",
+        "5"
+    )
 )
 
 SL_PERCENT = Decimal(
-    os.getenv("SL_PERCENT", "0.4")
+    os.getenv(
+        "SL_PERCENT",
+        "0.4"
+    )
 )
 
 TP_PERCENT = Decimal(
-    os.getenv("TP_PERCENT", "0.8")
+    os.getenv(
+        "TP_PERCENT",
+        "0.8"
+    )
+)
+
+BAR = os.getenv(
+    "BAR",
+    "5m"
+)
+
+TREND_BAR = os.getenv(
+    "TREND_BAR",
+    "15m"
 )
 
 POLL_SECONDS = int(
-    os.getenv("POLL_SECONDS", "15")
-)
-
-ADX_MIN = Decimal(
-    os.getenv("ADX_MIN", "18")
-)
-
-VOLUME_MULT = Decimal(
-    os.getenv("VOLUME_MULT", "0.8")
-)
-
-ATR_MIN_PCT = Decimal(
-    os.getenv("ATR_MIN_PCT", "0.05")
+    os.getenv(
+        "POLL_SECONDS",
+        "15"
+    )
 )
 
 TD_MODE = os.getenv(
@@ -71,31 +106,71 @@ TD_MODE = os.getenv(
     "isolated"
 )
 
+POS_SIDE = os.getenv(
+    "POS_SIDE",
+    "net"
+)
+
+
+# =========================================================
+# STRATEGY SETTINGS
+# =========================================================
+
+ADX_MIN = Decimal(
+    os.getenv(
+        "ADX_MIN",
+        "18"
+    )
+)
+
+VOLUME_MULT = Decimal(
+    os.getenv(
+        "VOLUME_MULT",
+        "0.8"
+    )
+)
+
+ATR_MIN_PCT = Decimal(
+    os.getenv(
+        "ATR_MIN_PCT",
+        "0.05"
+    )
+)
+
+
+# =========================================================
+# SYMBOLS
+# =========================================================
+
 SYMBOLS = [
-    x.strip()
-    for x in os.getenv(
+    item.strip()
+    for item in os.getenv(
         "SYMBOLS",
         "BTC-USDT-SWAP,ETH-USDT-SWAP,XRP-USDT-SWAP,DOGE-USDT-SWAP"
     ).split(",")
-    if x.strip()
+    if item.strip()
 ]
 
+
 # =========================================================
-# APP
+# APPLICATION
 # =========================================================
 
 app = Flask(__name__)
 
 session = requests.Session()
 
-last_candle = {}
+last_processed_candle = {}
+
+server_time_offset_ms = 0
 
 
 # =========================================================
-# LOGGING
+# LOG
 # =========================================================
 
 def log(message):
+
     print(
         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"{message}",
@@ -104,14 +179,57 @@ def log(message):
 
 
 # =========================================================
-# OKX SIGNATURE
+# SERVER TIME
 # =========================================================
+
+def sync_server_time():
+
+    global server_time_offset_ms
+
+    response = session.get(
+        BASE_URL + "/api/v5/public/time",
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("code") != "0":
+        raise RuntimeError(
+            f"OKX TIME ERROR: {data}"
+        )
+
+    server_ms = int(
+        data["data"][0]["ts"]
+    )
+
+    local_ms = int(
+        time.time() * 1000
+    )
+
+    server_time_offset_ms = (
+        server_ms - local_ms
+    )
+
+    log(
+        "OKX server time synchronized"
+    )
+
 
 def utc_timestamp():
 
-    return datetime.now(
+    timestamp_ms = (
+        int(time.time() * 1000)
+        + server_time_offset_ms
+    )
+
+    timestamp = datetime.fromtimestamp(
+        timestamp_ms / 1000,
         timezone.utc
-    ).isoformat(
+    )
+
+    return timestamp.isoformat(
         timespec="milliseconds"
     ).replace(
         "+00:00",
@@ -119,17 +237,21 @@ def utc_timestamp():
     )
 
 
+# =========================================================
+# SIGNATURE
+# =========================================================
+
 def create_signature(
     timestamp,
     method,
-    path,
+    request_path,
     body=""
 ):
 
     message = (
         timestamp
         + method.upper()
-        + path
+        + request_path
         + body
     )
 
@@ -145,7 +267,7 @@ def create_signature(
 
 
 # =========================================================
-# PUBLIC OKX REQUEST
+# PUBLIC REQUEST
 # =========================================================
 
 def public_get(
@@ -166,8 +288,8 @@ def public_get(
     if data.get("code") != "0":
 
         raise RuntimeError(
-            f"OKX PUBLIC ERROR: "
-            f"{data.get('code')} "
+            f"OKX PUBLIC ERROR "
+            f"{data.get('code')}: "
             f"{data.get('msg')}"
         )
 
@@ -175,7 +297,7 @@ def public_get(
 
 
 # =========================================================
-# PRIVATE OKX REQUEST
+# PRIVATE REQUEST
 # =========================================================
 
 def private_request(
@@ -209,6 +331,23 @@ def private_request(
             separators=(",", ":")
         )
 
+    request_path = path
+
+    if params:
+
+        query_parts = []
+
+        for key, value in params.items():
+
+            query_parts.append(
+                f"{key}={value}"
+            )
+
+        request_path += (
+            "?"
+            + "&".join(query_parts)
+        )
+
     timestamp = utc_timestamp()
 
     headers = {
@@ -217,7 +356,7 @@ def private_request(
         "OK-ACCESS-SIGN": create_signature(
             timestamp,
             method,
-            path,
+            request_path,
             body
         ),
         "OK-ACCESS-PASSPHRASE": PASSPHRASE,
@@ -246,8 +385,8 @@ def private_request(
     if data.get("code") != "0":
 
         raise RuntimeError(
-            f"OKX PRIVATE ERROR: "
-            f"{data.get('code')} "
+            f"OKX PRIVATE ERROR "
+            f"{data.get('code')}: "
             f"{data.get('msg')}"
         )
 
@@ -255,12 +394,12 @@ def private_request(
 
 
 # =========================================================
-# MARKET DATA
+# MARKET CANDLES
 # =========================================================
 
 def get_candles(
     symbol,
-    bar="5m",
+    bar,
     limit=160
 ):
 
@@ -431,10 +570,12 @@ def calculate_rsi(
             period
         ] = (
             Decimal("100")
-            - Decimal("100")
-            / (
-                Decimal("1")
-                + rs
+            - (
+                Decimal("100")
+                / (
+                    Decimal("1")
+                    + rs
+                )
             )
         )
 
@@ -472,10 +613,12 @@ def calculate_rsi(
                 i + 1
             ] = (
                 Decimal("100")
-                - Decimal("100")
-                / (
-                    Decimal("1")
-                    + rs
+                - (
+                    Decimal("100")
+                    / (
+                        Decimal("1")
+                        + rs
+                    )
                 )
             )
 
@@ -495,7 +638,7 @@ def calculate_atr(
 
         return None
 
-    trs = []
+    true_ranges = []
 
     for i in range(
         1,
@@ -504,11 +647,12 @@ def calculate_atr(
 
         high = candles[i]["high"]
         low = candles[i]["low"]
+
         previous_close = (
             candles[i - 1]["close"]
         )
 
-        tr = max(
+        true_range = max(
             high - low,
             abs(
                 high
@@ -520,11 +664,13 @@ def calculate_atr(
             )
         )
 
-        trs.append(tr)
+        true_ranges.append(
+            true_range
+        )
 
     return (
         sum(
-            trs[-period:],
+            true_ranges[-period:],
             Decimal("0")
         )
         / Decimal(period)
@@ -540,7 +686,9 @@ def calculate_adx(
     period=14
 ):
 
-    if len(candles) < period + 2:
+    if len(candles) < (
+        period + 2
+    ):
 
         return Decimal("0")
 
@@ -623,10 +771,10 @@ def calculate_adx(
 
 
 # =========================================================
-# 15 MINUTE TREND
+# 15M TREND
 # =========================================================
 
-def get_trend(
+def get_15m_trend(
     symbol
 ):
 
@@ -637,8 +785,9 @@ def get_trend(
     )
 
     candles = [
-        x for x in candles
-        if x["confirm"] == "1"
+        candle
+        for candle in candles
+        if candle["confirm"] == "1"
     ]
 
     if len(candles) < 22:
@@ -646,8 +795,8 @@ def get_trend(
         return "flat"
 
     closes = [
-        x["close"]
-        for x in candles
+        candle["close"]
+        for candle in candles
     ]
 
     ema20 = calculate_ema(
@@ -655,9 +804,7 @@ def get_trend(
         20
     )
 
-    i = len(
-        closes
-    ) - 1
+    i = len(candles) - 1
 
     if (
         ema20[i] is None
@@ -668,16 +815,14 @@ def get_trend(
 
     if (
         closes[i] > ema20[i]
-        and ema20[i]
-        > ema20[i - 1]
+        and ema20[i] > ema20[i - 1]
     ):
 
         return "bull"
 
     if (
         closes[i] < ema20[i]
-        and ema20[i]
-        < ema20[i - 1]
+        and ema20[i] < ema20[i - 1]
     ):
 
         return "bear"
@@ -686,10 +831,10 @@ def get_trend(
 
 
 # =========================================================
-# SIGNAL ENGINE
+# SIGNAL
 # =========================================================
 
-def get_signal(
+def calculate_signal(
     symbol
 ):
 
@@ -700,22 +845,18 @@ def get_signal(
     )
 
     candles = [
-        x for x in candles
-        if x["confirm"] == "1"
+        candle
+        for candle in candles
+        if candle["confirm"] == "1"
     ]
 
     if len(candles) < 105:
 
-        log(
-            f"{symbol}: "
-            f"Not enough candles"
-        )
-
         return None
 
     closes = [
-        x["close"]
-        for x in candles
+        candle["close"]
+        for candle in candles
     ]
 
     rsi14 = calculate_rsi(
@@ -743,19 +884,21 @@ def get_signal(
         14
     )
 
-    i = len(
-        candles
-    ) - 1
+    i = len(candles) - 1
 
     if (
         rsi14[i] is None
+        or rsi14[i - 1] is None
         or rsi100[i] is None
+        or rsi100[i - 1] is None
         or ema20[i] is None
+        or ema20[i - 1] is None
         or atr is None
     ):
 
         return None
 
+    # RSI crossover
     buy_rsi = (
         rsi14[i - 1]
         <= rsi100[i - 1]
@@ -772,6 +915,7 @@ def get_signal(
         < rsi100[i]
     )
 
+    # EMA20 signal for sideways market
     buy_ema = (
         closes[i - 1]
         <= ema20[i - 1]
@@ -821,8 +965,8 @@ def get_signal(
 
     average_volume = (
         sum(
-            x["volume"]
-            for x in candles[-21:-1]
+            candle["volume"]
+            for candle in candles[-21:-1]
         )
         / Decimal("20")
     )
@@ -852,19 +996,20 @@ def get_signal(
 
         return None
 
-    trend = get_trend(
+    trend15 = get_15m_trend(
         symbol
     )
 
+    # 15m confirmation
     if (
-        trend == "bull"
+        trend15 == "bull"
         and signal != "buy"
     ):
 
         return None
 
     if (
-        trend == "bear"
+        trend15 == "bear"
         and signal != "sell"
     ):
 
@@ -879,19 +1024,547 @@ def get_signal(
         "ema20": ema20[i],
         "adx": adx,
         "atr": atr,
-        "trend15": trend
+        "trend15": trend15
     }
 
 
 # =========================================================
-# OKX CONNECTION TEST
+# INSTRUMENT INFORMATION
 # =========================================================
 
-def test_okx():
-
-    log("Testing OKX market connection...")
+def get_instrument(
+    symbol
+):
 
     data = public_get(
+        "/api/v5/public/instruments",
+        {
+            "instType": "SWAP",
+            "instId": symbol
+        }
+    )
+
+    if not data.get("data"):
+
+        raise RuntimeError(
+            f"Instrument not found: {symbol}"
+        )
+
+    item = data["data"][0]
+
+    return {
+        "ctVal": Decimal(
+            item["ctVal"]
+        ),
+        "ctValCcy": item[
+            "ctValCcy"
+        ],
+        "lotSz": Decimal(
+            item["lotSz"]
+        ),
+        "minSz": Decimal(
+            item["minSz"]
+        ),
+        "tickSz": Decimal(
+            item["tickSz"]
+        )
+    }
+
+
+# =========================================================
+# ROUNDING
+# =========================================================
+
+def round_down(
+    value,
+    step
+):
+
+    if step <= 0:
+
+        return value
+
+    units = (
+        value / step
+    ).to_integral_value(
+        rounding=ROUND_DOWN
+    )
+
+    return units * step
+
+
+# =========================================================
+# MARKET PRICE
+# =========================================================
+
+def get_last_price(
+    symbol
+):
+
+    data = public_get(
+        "/api/v5/market/ticker",
+        {
+            "instId": symbol
+        }
+    )
+
+    if not data.get("data"):
+
+        raise RuntimeError(
+            f"No ticker data: {symbol}"
+        )
+
+    return Decimal(
+        data["data"][0]["last"]
+    )
+
+
+# =========================================================
+# POSITION SIZE
+# =========================================================
+
+def calculate_contract_size(
+    symbol,
+    price
+):
+
+    info = get_instrument(
+        symbol
+    )
+
+    if info["ctValCcy"].upper() != "BTC" and \
+       symbol.endswith("-USDT-SWAP"):
+
+        pass
+
+    target_notional = (
+        MARGIN_USDT
+        * LEVERAGE
+    )
+
+    contract_value = (
+        price
+        * info["ctVal"]
+    )
+
+    if contract_value <= 0:
+
+        raise RuntimeError(
+            "Invalid contract value"
+        )
+
+    raw_size = (
+        target_notional
+        / contract_value
+    )
+
+    size = round_down(
+        raw_size,
+        info["lotSz"]
+    )
+
+    if size < info["minSz"]:
+
+        size = info["minSz"]
+
+    return size, info
+
+
+# =========================================================
+# SET LEVERAGE
+# =========================================================
+
+def set_leverage(
+    symbol
+):
+
+    payload = {
+        "instId": symbol,
+        "lever": str(
+            LEVERAGE
+        ),
+        "mgnMode": TD_MODE
+    }
+
+    return private_request(
+        "POST",
+        "/api/v5/account/set-leverage",
+        payload
+    )
+
+
+# =========================================================
+# GET POSITIONS
+# =========================================================
+
+def get_positions(
+    symbol
+):
+
+    data = private_request(
+        "GET",
+        "/api/v5/account/positions",
+        params={
+            "instId": symbol
+        }
+    )
+
+    positions = []
+
+    for position in data.get(
+        "data",
+        []
+    ):
+
+        try:
+
+            position_size = Decimal(
+                position.get(
+                    "pos",
+                    "0"
+                )
+            )
+
+        except Exception:
+
+            position_size = Decimal("0")
+
+        if position_size != 0:
+
+            positions.append(
+                position
+            )
+
+    return positions
+
+
+# =========================================================
+# CLOSE EXISTING NET POSITION
+# =========================================================
+
+def close_position(
+    symbol,
+    position
+):
+
+    pos_size = position.get(
+        "pos",
+        "0"
+    )
+
+    if Decimal(
+        pos_size
+    ) == 0:
+
+        return None
+
+    side = (
+        "sell"
+        if Decimal(pos_size) > 0
+        else "buy"
+    )
+
+    size = str(
+        abs(
+            Decimal(pos_size)
+        )
+    )
+
+    payload = {
+        "instId": symbol,
+        "tdMode": TD_MODE,
+        "side": side,
+        "posSide": "net",
+        "ordType": "market",
+        "sz": size,
+        "reduceOnly": True
+    }
+
+    log(
+        f"CLOSING EXISTING POSITION "
+        f"{symbol} size={size}"
+    )
+
+    return private_request(
+        "POST",
+        "/api/v5/trade/order",
+        payload
+    )
+
+
+# =========================================================
+# OPEN DEMO POSITION
+# =========================================================
+
+def open_position(
+    symbol,
+    signal
+):
+
+    price = signal["entry"]
+
+    size, info = calculate_contract_size(
+        symbol,
+        price
+    )
+
+    set_leverage(
+        symbol
+    )
+
+    if signal["signal"] == "buy":
+
+        side = "buy"
+
+        sl_price = (
+            price
+            * (
+                Decimal("1")
+                - (
+                    SL_PERCENT
+                    / Decimal("100")
+                )
+            )
+        )
+
+        tp_price = (
+            price
+            * (
+                Decimal("1")
+                + (
+                    TP_PERCENT
+                    / Decimal("100")
+                )
+            )
+        )
+
+    else:
+
+        side = "sell"
+
+        sl_price = (
+            price
+            * (
+                Decimal("1")
+                + (
+                    SL_PERCENT
+                    / Decimal("100")
+                )
+            )
+        )
+
+        tp_price = (
+            price
+            * (
+                Decimal("1")
+                - (
+                    TP_PERCENT
+                    / Decimal("100")
+                )
+            )
+        )
+
+    sl_price = round_down(
+        sl_price,
+        info["tickSz"]
+    )
+
+    tp_price = round_down(
+        tp_price,
+        info["tickSz"]
+    )
+
+    order_id = (
+        "rsi"
+        + str(
+            int(
+                time.time() * 1000
+            )
+        )
+    )[-32:]
+
+    payload = {
+        "instId": symbol,
+        "tdMode": TD_MODE,
+        "side": side,
+        "posSide": POS_SIDE,
+        "ordType": "market",
+        "sz": str(size),
+        "clOrdId": order_id,
+        "attachAlgoOrds": [
+            {
+                "attachAlgoClOrdId": (
+                    order_id
+                    + "a"
+                )[-32:],
+                "tpTriggerPx": str(
+                    tp_price
+                ),
+                "tpOrdPx": "-1",
+                "tpTriggerPxType": "mark",
+                "slTriggerPx": str(
+                    sl_price
+                ),
+                "slOrdPx": "-1",
+                "slTriggerPxType": "mark"
+            }
+        ]
+    }
+
+    log(
+        "===================================="
+    )
+
+    log(
+        f"PLACING DEMO ORDER: "
+        f"{symbol} "
+        f"{side.upper()}"
+    )
+
+    log(
+        f"Margin=${MARGIN_USDT} "
+        f"Leverage={LEVERAGE}x"
+    )
+
+    log(
+        f"Contracts={size}"
+    )
+
+    log(
+        f"Entry={price}"
+    )
+
+    log(
+        f"SL={sl_price}"
+    )
+
+    log(
+        f"TP={tp_price}"
+    )
+
+    result = private_request(
+        "POST",
+        "/api/v5/trade/order",
+        payload
+    )
+
+    log(
+        "ORDER REQUEST ACCEPTED"
+    )
+
+    log(
+        json.dumps(
+            result,
+            default=str
+        )
+    )
+
+    return {
+        "status": "order_sent",
+        "symbol": symbol,
+        "side": side,
+        "contracts": str(size),
+        "entry": str(price),
+        "sl": str(sl_price),
+        "tp": str(tp_price),
+        "okx": result
+    }
+
+
+# =========================================================
+# EXECUTE SIGNAL
+# =========================================================
+
+def execute(
+    symbol,
+    signal
+):
+
+    if not DEMO:
+
+        raise RuntimeError(
+            "DEMO mode is required. "
+            "Set OKX_DEMO=true."
+        )
+
+    positions = get_positions(
+        symbol
+    )
+
+    desired_side = (
+        "long"
+        if signal["signal"] == "buy"
+        else "short"
+    )
+
+    # Do not duplicate same-direction trade
+    for position in positions:
+
+        pos_side = position.get(
+            "posSide",
+            "net"
+        )
+
+        position_size = Decimal(
+            position.get(
+                "pos",
+                "0"
+            )
+        )
+
+        if (
+            position_size != 0
+            and POS_SIDE == "net"
+        ):
+
+            if (
+                signal["signal"] == "buy"
+                and position_size > 0
+            ):
+
+                return {
+                    "status": "ignored",
+                    "reason":
+                    "BUY position already open"
+                }
+
+            if (
+                signal["signal"] == "sell"
+                and position_size < 0
+            ):
+
+                return {
+                    "status": "ignored",
+                    "reason":
+                    "SELL position already open"
+                }
+
+            close_position(
+                symbol,
+                position
+            )
+
+            time.sleep(1)
+
+    result = open_position(
+        symbol,
+        signal
+    )
+
+    return result
+
+
+# =========================================================
+# TEST OKX CONNECTION
+# =========================================================
+
+def test_okx_connection():
+
+    log(
+        "Testing OKX public market connection..."
+    )
+
+    ticker = public_get(
         "/api/v5/market/ticker",
         {
             "instId":
@@ -899,9 +1572,9 @@ def test_okx():
         }
     )
 
-    if data.get("data"):
+    if ticker.get("data"):
 
-        price = data[
+        btc_price = ticker[
             "data"
         ][0].get(
             "last"
@@ -909,21 +1582,31 @@ def test_okx():
 
         log(
             "OKX MARKET CONNECTED | "
-            f"BTC price={price}"
+            f"BTC={btc_price}"
         )
 
-    if API_KEY and SECRET_KEY and PASSPHRASE:
+    if (
+        API_KEY
+        and SECRET_KEY
+        and PASSPHRASE
+    ):
 
-        account = private_request(
+        log(
+            "Testing OKX private API..."
+        )
+
+        balance = private_request(
             "GET",
             "/api/v5/account/balance"
         )
 
-        log(
-            "OKX PRIVATE API CONNECTED"
-        )
+        if balance.get("code") == "0":
 
-        return account
+            log(
+                "OKX PRIVATE API CONNECTED"
+            )
+
+        return balance
 
     log(
         "WARNING: OKX API credentials "
@@ -934,86 +1617,18 @@ def test_okx():
 
 
 # =========================================================
-# ORDER
-# =========================================================
-
-def place_demo_order(
-    symbol,
-    signal
-):
-
-    log(
-        f"ORDER SIGNAL: "
-        f"{symbol} "
-        f"{signal['signal'].upper()} "
-        f"Entry={signal['entry']} "
-        f"SL={SL_PERCENT}% "
-        f"TP={TP_PERCENT}%"
-    )
-
-    if not DEMO:
-
-        log(
-            "LIVE TRADING IS DISABLED "
-            "IN THIS VERSION"
-        )
-
-        return {
-            "status": "blocked",
-            "message": (
-                "DEMO mode required"
-            )
-        }
-
-    if (
-        not API_KEY
-        or not SECRET_KEY
-        or not PASSPHRASE
-    ):
-
-        return {
-            "status": "blocked",
-            "message": (
-                "OKX API credentials missing"
-            )
-        }
-
-    log(
-        "Demo signal detected. "
-        "Order execution requires "
-        "contract-size verification "
-        "before live API order placement."
-    )
-
-    return {
-        "status": "signal",
-        "symbol": symbol,
-        "side": signal["signal"],
-        "entry": str(
-            signal["entry"]
-        ),
-        "sl_percent": str(
-            SL_PERCENT
-        ),
-        "tp_percent": str(
-            TP_PERCENT
-        )
-    }
-
-
-# =========================================================
-# BOT WORKER
+# WORKER
 # =========================================================
 
 def worker():
 
     log(
-        "===================================="
+        "========================================"
     )
 
     log(
         "OKX RSI + EMA20 + ADX + ATR "
-        "+ Volume V3 STARTED"
+        "+ VOLUME V4 STARTED"
     )
 
     log(
@@ -1029,11 +1644,19 @@ def worker():
     )
 
     log(
-        f"TIMEFRAME={BAR}"
+        f"BAR={BAR}"
     )
 
     log(
-        f"TREND={TREND_BAR}"
+        f"TREND_BAR={TREND_BAR}"
+    )
+
+    log(
+        f"TD_MODE={TD_MODE}"
+    )
+
+    log(
+        f"POS_SIDE={POS_SIDE}"
     )
 
     log(
@@ -1041,12 +1664,24 @@ def worker():
     )
 
     log(
-        "===================================="
+        "========================================"
     )
 
     try:
 
-        test_okx()
+        sync_server_time()
+
+    except Exception as error:
+
+        log(
+            "TIME SYNC ERROR: "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+    try:
+
+        test_okx_connection()
 
     except Exception as error:
 
@@ -1077,8 +1712,9 @@ def worker():
                 )
 
                 confirmed = [
-                    x for x in candles
-                    if x["confirm"] == "1"
+                    candle
+                    for candle in candles
+                    if candle["confirm"] == "1"
                 ]
 
                 log(
@@ -1096,50 +1732,52 @@ def worker():
                 )
 
                 if (
-                    last_candle.get(symbol)
+                    last_processed_candle.get(
+                        symbol
+                    )
                     == candle_time
                 ):
 
                     continue
 
-                last_candle[
+                last_processed_candle[
                     symbol
                 ] = candle_time
 
-                signal = get_signal(
+                signal = calculate_signal(
                     symbol
                 )
 
-                if signal:
-
-                    log(
-                        f"*** SIGNAL *** "
-                        f"{symbol} "
-                        f"{signal['signal'].upper()} "
-                        f"Reason={signal['reason']} "
-                        f"ADX={signal['adx']} "
-                        f"Trend15={signal['trend15']} "
-                        f"Entry={signal['entry']}"
-                    )
-
-                    result = place_demo_order(
-                        symbol,
-                        signal
-                    )
-
-                    log(
-                        json.dumps(
-                            result,
-                            default=str
-                        )
-                    )
-
-                else:
+                if signal is None:
 
                     log(
                         f"{symbol}: "
-                        f"No valid signal"
+                        f"NO VALID SIGNAL"
                     )
+
+                    continue
+
+                log(
+                    f"*** SIGNAL *** "
+                    f"{symbol} "
+                    f"{signal['signal'].upper()} "
+                    f"reason={signal['reason']} "
+                    f"entry={signal['entry']} "
+                    f"ADX={signal['adx']} "
+                    f"Trend15={signal['trend15']}"
+                )
+
+                result = execute(
+                    symbol,
+                    signal
+                )
+
+                log(
+                    json.dumps(
+                        result,
+                        default=str
+                    )
+                )
 
             except Exception as error:
 
@@ -1163,14 +1801,22 @@ def home():
 
     return jsonify(
         {
-            "bot": "OKX RSI EMA20 ADX ATR Volume Scalping V3",
-            "status": "running",
-            "demo": DEMO,
-            "margin_usdt": str(MARGIN_USDT),
-            "leverage": str(LEVERAGE),
-            "timeframe": BAR,
-            "trend_timeframe": TREND_BAR,
-            "symbols": SYMBOLS
+            "bot":
+            "OKX RSI EMA20 ADX ATR Volume Scalping V4",
+            "status":
+            "running",
+            "demo":
+            DEMO,
+            "margin_usdt":
+            str(MARGIN_USDT),
+            "leverage":
+            str(LEVERAGE),
+            "timeframe":
+            BAR,
+            "trend_timeframe":
+            TREND_BAR,
+            "symbols":
+            SYMBOLS
         }
     )
 
@@ -1180,27 +1826,37 @@ def health():
 
     return jsonify(
         {
-            "status": "healthy",
-            "demo": DEMO,
-            "api_key_present": bool(API_KEY),
-            "secret_present": bool(SECRET_KEY),
-            "passphrase_present": bool(PASSPHRASE),
-            "margin_usdt": str(MARGIN_USDT),
-            "leverage": str(LEVERAGE),
-            "symbols": SYMBOLS
+            "status":
+            "healthy",
+            "demo":
+            DEMO,
+            "api_key_present":
+            bool(API_KEY),
+            "secret_present":
+            bool(SECRET_KEY),
+            "passphrase_present":
+            bool(PASSPHRASE),
+            "margin_usdt":
+            str(MARGIN_USDT),
+            "leverage":
+            str(LEVERAGE),
+            "symbols":
+            SYMBOLS
         }
     )
 
 
 # =========================================================
-# START
+# MAIN
 # =========================================================
 
 if __name__ == "__main__":
 
     import threading
 
-    log("========== BOT STARTING ==========")
+    log(
+        "========== BOT STARTING =========="
+    )
 
     worker_thread = threading.Thread(
         target=worker,
@@ -1209,7 +1865,9 @@ if __name__ == "__main__":
 
     worker_thread.start()
 
-    log("========== WORKER STARTED ==========")
+    log(
+        "========== WORKER STARTED =========="
+    )
 
     port = int(
         os.getenv(
@@ -1219,11 +1877,11 @@ if __name__ == "__main__":
     )
 
     log(
-        f"========== WEB SERVER PORT {port} =========="
+        f"========== WEB SERVER PORT "
+        f"{port} =========="
     )
 
     app.run(
         host="0.0.0.0",
         port=port
-    )
-    
+    )   

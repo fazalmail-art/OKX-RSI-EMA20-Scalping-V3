@@ -1163,20 +1163,14 @@ def home():
 
     return jsonify(
         {
-            "bot":
-            "OKX RSI EMA20 ADX ATR Volume Scalping V3",
-            "status":
-            "running",
-            "demo":
-            DEMO,
-            "margin_usdt":
-            str(MARGIN_USDT),
-            "leverage":
-            str(LEVERAGE),
-            "timeframe":
-            BAR,
-            "trend_timeframe":
-            TREND_BAR
+            "bot": "OKX RSI EMA20 ADX ATR Volume Scalping V3",
+            "status": "running",
+            "demo": DEMO,
+            "margin_usdt": str(MARGIN_USDT),
+            "leverage": str(LEVERAGE),
+            "timeframe": BAR,
+            "trend_timeframe": TREND_BAR,
+            "symbols": SYMBOLS
         }
     )
 
@@ -1186,22 +1180,14 @@ def health():
 
     return jsonify(
         {
-            "status":
-            "healthy",
-            "demo":
-            DEMO,
-            "api_key_present":
-            bool(API_KEY),
-            "secret_present":
-            bool(SECRET_KEY),
-            "passphrase_present":
-            bool(PASSPHRASE),
-            "margin_usdt":
-            str(MARGIN_USDT),
-            "leverage":
-            str(LEVERAGE),
-            "symbols":
-            SYMBOLS
+            "status": "healthy",
+            "demo": DEMO,
+            "api_key_present": bool(API_KEY),
+            "secret_present": bool(SECRET_KEY),
+            "passphrase_present": bool(PASSPHRASE),
+            "margin_usdt": str(MARGIN_USDT),
+            "leverage": str(LEVERAGE),
+            "symbols": SYMBOLS
         }
     )
 
@@ -1214,12 +1200,16 @@ if __name__ == "__main__":
 
     import threading
 
-    thread = threading.Thread(
+    log("========== BOT STARTING ==========")
+
+    worker_thread = threading.Thread(
         target=worker,
         daemon=True
     )
 
-    thread.start()
+    worker_thread.start()
+
+    log("========== WORKER STARTED ==========")
 
     port = int(
         os.getenv(
@@ -1228,4 +1218,12 @@ if __name__ == "__main__":
         )
     )
 
+    log(
+        f"========== WEB SERVER PORT {port} =========="
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
     

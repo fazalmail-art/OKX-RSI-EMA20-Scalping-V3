@@ -933,21 +933,23 @@ def worker():
 
                 if signal:
 
-                    print(
-                        f"{datetime.now()} "
-                        f"{symbol}: "
-                        f"{signal['signal'].upper()} "
-                        f"[{signal['reason']}] "
-                        f"ADX={signal['adx']} "
-                        f"Trend15={signal['trend15']}"
-                    )
+    print(
+        f"{datetime.now()} "
+        f"{symbol}: "
+        f"{signal['signal'].upper()} "
+        f"[{signal['reason']}] "
+        f"ADX={signal['adx']} "
+        f"Trend15={signal['trend15']}"
+    )
 
-                    result = execute(
-                        symbol,
-                        signal
-                    )
+    result = execute(
+        symbol,
+        signal
+    )
 
-                    print(
-                        json.dumps(
-                            result,
-     
+    print(
+        json.dumps(
+            result,
+            default=str
+        )
+)

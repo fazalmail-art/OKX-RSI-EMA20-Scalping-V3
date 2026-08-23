@@ -51,7 +51,7 @@ ADX_MIN = Decimal(os.getenv("ADX_MIN", "18"))
 VOLUME_MULT = Decimal(os.getenv("VOLUME_MULT", "0.8"))
 ATR_MIN_PCT = Decimal(os.getenv("ATR_MIN_PCT", "0.05"))
 
-TD_MODE = os.getenv("TD_MODE", "cross")
+TD_MODE = os.getenv("TD_MODE", "isolated")
 
 # =========================================================
 # DYNAMIC PROTECTION
@@ -66,7 +66,7 @@ BREAK_EVEN_OFFSET_PCT = Decimal(
 )
 
 TRAIL_START_PCT = Decimal(
-    os.getenv("TRAIL_START_PCT", "0.50")
+    os.getenv("TRAIL_START_PCT", "0.45")
 )
 
 TRAIL_DISTANCE_PCT = Decimal(

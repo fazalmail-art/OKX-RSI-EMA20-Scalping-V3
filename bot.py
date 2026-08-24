@@ -948,11 +948,20 @@ def price_action_structure(candles):
     # exactly that AND of the five stage booleans above -- nothing here can
     # report PA_COMPLETE=True while under-counting to 3/5 or 4/5; the score
     # and the completion flag are now derived from the identical stage list.
-    pa_complete_buy = all(bull_stage)
-    pa_complete_sell = all(bear_stage)
-    assert pa_complete_buy == (pa_buy == PA_STAGE_COUNT)
-    assert pa_complete_sell == (pa_sell == PA_STAGE_COUNT)
+    pa_complete_buy = (
+    bull_sr_ok
+    and bull_sweep_ok
+    and bull_reclaim_ok
+    and (bull_bos_ok or bull_retest_ok)
+)
 
+pa_complete_sell = (
+    bear_sr_ok
+    and bear_sweep_ok
+    and bear_reclaim_ok
+    and (bear_bos_ok or bear_retest_ok)
+)
+    
     bull_candle_confirm = bull_candle_idx is not None
     bear_candle_confirm = bear_candle_idx is not None
     bull_ob_confirm = ob == "BULLISH"

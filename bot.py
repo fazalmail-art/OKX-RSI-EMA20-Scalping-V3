@@ -67,7 +67,8 @@ HIGH_VOLUME_UTC_WINDOWS = (
 )
 
 SYMBOLS = [
-    x.strip() for x in os.getenv(
+    x.strip()
+    for x in os.getenv(
         "SYMBOLS",
         "BTC-USDT-SWAP,"
         "ETH-USDT-SWAP,"
@@ -75,8 +76,12 @@ SYMBOLS = [
         "DOGE-USDT-SWAP,"
         "SOL-USDT-SWAP,"
         "SHIB-USDT-SWAP,"
+        "FIL-USDT-SWAP,"
+        "NEAR-USDT-SWAP,"
+        "ICP-USDT-SWAP,"
         "XAU-USDT-SWAP"
-    ).split(",") if x.strip()
+    ).split(",")
+    if x.strip()
 ]
 
 MEME_SYMBOLS = {"DOGE-USDT-SWAP", "SHIB-USDT-SWAP"}

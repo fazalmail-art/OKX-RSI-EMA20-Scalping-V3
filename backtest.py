@@ -190,12 +190,22 @@ def analyze_at(symbol, candles_15m, candles_1h, idx):
 def simulate_trade(symbol, candles_15m, entry_idx, side, entry_price, atr_pct, notional):
     """Walks forward bar-by-bar using high/low to detect SL / partial-TP /
     final-TP touches, replicating the scale-out + breakeven + trailing +
-    step-TP logic from bot.py's management functions."""
+    step-TP logic from bot.py's management functions.
+
+    IMPORTANT: subtracts the round-trip trading fee (entry + exit, per
+    bot.FEE_RATE_PER_SIDE) from every simulated trade's PnL. An earlier
+    version of this script only used fees as an ENTRY FILTER (matching
+    bot.fee_buffer_ok's live gate) but never deducted them from the
+    result -- that overstated the apparent edge substantially, since the
+    raw price-move edge here is thin enough that fees can flip it
+    negative."""
     tick = entry_price * Decimal("0.0001")  # rough tick approximation for backtest
     sl, tp = bot.calculate_initial_sl_tp(side, entry_price, tick, atr_pct)
     _, tp_pct = bot.get_effective_sl_tp_pct(atr_pct)
     partial_pct = tp_pct * bot.PARTIAL_TP_RATIO
     partial_price = bot.calculate_target_price(side, entry_price, tick, partial_pct)
+
+    round_trip_fee_pct = bot.FEE_RATE_PER_SIDE * Decimal("2") * Decimal("100")
 
     fraction_remaining = Decimal("1")
     scaled_out = False
@@ -212,7 +222,7 @@ def simulate_trade(symbol, candles_15m, entry_idx, side, entry_price, atr_pct, n
             if hit_sl:
                 move = (sl - entry_price) / entry_price if side == "buy" else (entry_price - sl) / entry_price
                 realized_pct += move * Decimal("100") * fraction_remaining
-                return realized_pct, "SL_full"
+                return realized_pct - round_trip_fee_pct, "SL_full"
             if hit_partial:
                 move = (partial_price - entry_price) / entry_price if side == "buy" else (entry_price - partial_price) / entry_price
                 realized_pct += move * Decimal("100") * bot.PARTIAL_TP_FRACTION
@@ -229,11 +239,11 @@ def simulate_trade(symbol, candles_15m, entry_idx, side, entry_price, atr_pct, n
             if hit_sl:
                 move = (sl - entry_price) / entry_price if side == "buy" else (entry_price - sl) / entry_price
                 realized_pct += move * Decimal("100") * fraction_remaining
-                return realized_pct, "SL_after_scaleout"
+                return realized_pct - round_trip_fee_pct, "SL_after_scaleout"
             if hit_tp:
                 move = (tp - entry_price) / entry_price if side == "buy" else (entry_price - tp) / entry_price
                 realized_pct += move * Decimal("100") * fraction_remaining
-                return realized_pct, "TP_final"
+                return realized_pct - round_trip_fee_pct, "TP_final"
             # trailing + step-TP re-evaluation using this bar's close as proxy for mark price
             price = bar["close"]
             profit = (price - entry_price) / entry_price * Decimal("100") if side == "buy" else (entry_price - price) / entry_price * Decimal("100")

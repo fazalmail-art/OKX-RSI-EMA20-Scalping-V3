@@ -187,25 +187,76 @@ def analyze_at(symbol, candles_15m, candles_1h, idx):
     return {"signal": signal, "atr_pct": atr_pct, "vol_mult": vol_mult, "notional": target_notional, "ts": ts_now, "entry": values[i]}
 
 
+def _simulate_single_stage(candles_15m, entry_idx, side, entry_price, sl, tp, tick, round_trip_fee_pct):
+    """Legacy single-stage path: full position size throughout. SL moves
+    to breakeven once profit reaches BREAK_EVEN_TRIGGER_PCT (not tied to
+    any partial fill), then trails/steps exactly as
+    bot._manage_position_oco_legacy does."""
+    step_level = 0
+    breakeven_done = False
+
+    for j in range(entry_idx + 1, len(candles_15m)):
+        bar = candles_15m[j]
+        hi, lo = bar["high"], bar["low"]
+
+        hit_sl = (lo <= sl) if side == "buy" else (hi >= sl)
+        hit_tp = (hi >= tp) if side == "buy" else (lo <= tp)
+        if hit_sl:
+            move = (sl - entry_price) / entry_price if side == "buy" else (entry_price - sl) / entry_price
+            return move * Decimal("100") - round_trip_fee_pct, "SL_single_stage"
+        if hit_tp:
+            move = (tp - entry_price) / entry_price if side == "buy" else (entry_price - tp) / entry_price
+            return move * Decimal("100") - round_trip_fee_pct, "TP_single_stage"
+
+        price = bar["close"]
+        profit = (price - entry_price) / entry_price * Decimal("100") if side == "buy" else (entry_price - price) / entry_price * Decimal("100")
+
+        if profit >= bot.BREAK_EVEN_TRIGGER_PCT and not breakeven_done:
+            be = entry_price * (Decimal("1") + bot.BREAK_EVEN_OFFSET_PCT / Decimal("100")) if side == "buy" else entry_price * (Decimal("1") - bot.BREAK_EVEN_OFFSET_PCT / Decimal("100"))
+            sl = max(sl, be) if side == "buy" else min(sl, be)
+            sl = bot.cap_sl_distance(side, entry_price, sl, tick)
+            breakeven_done = True
+
+        if profit >= bot.TRAIL_START_PCT:
+            tr = price * (Decimal("1") - bot.TRAIL_DISTANCE_PCT / Decimal("100")) if side == "buy" else price * (Decimal("1") + bot.TRAIL_DISTANCE_PCT / Decimal("100"))
+            sl = max(sl, tr) if side == "buy" else min(sl, tr)
+            sl = bot.cap_sl_distance(side, entry_price, sl, tick)
+
+        achieved_step = int((profit / bot.STEP_TRIGGER_PCT).to_integral_value()) if profit > 0 else 0
+        if achieved_step > step_level:
+            step_level = achieved_step
+            if side == "buy":
+                tp = max(tp, entry_price * (Decimal("1") + Decimal(step_level + 1) * bot.STEP_TRIGGER_PCT / Decimal("100")))
+            else:
+                tp = min(tp, entry_price * (Decimal("1") - Decimal(step_level + 1) * bot.STEP_TRIGGER_PCT / Decimal("100")))
+
+    return None, "STILL_OPEN_AT_DATA_END"
+
+
 def simulate_trade(symbol, candles_15m, entry_idx, side, entry_price, atr_pct, notional):
     """Walks forward bar-by-bar using high/low to detect SL / partial-TP /
     final-TP touches, replicating the scale-out + breakeven + trailing +
     step-TP logic from bot.py's management functions.
 
     IMPORTANT: subtracts the round-trip trading fee (entry + exit, per
-    bot.FEE_RATE_PER_SIDE) from every simulated trade's PnL. An earlier
-    version of this script only used fees as an ENTRY FILTER (matching
-    bot.fee_buffer_ok's live gate) but never deducted them from the
-    result -- that overstated the apparent edge substantially, since the
-    raw price-move edge here is thin enough that fees can flip it
-    negative."""
+    bot.FEE_RATE_PER_SIDE) from every simulated trade's PnL.
+
+    Respects bot.PARTIAL_TP_ENABLE: when False, simulates the legacy
+    single-stage path instead (full position size throughout, breakeven
+    triggered by BREAK_EVEN_TRIGGER_PCT profit rather than a partial
+    fill event) -- this lets the two profit-taking designs be compared
+    directly on identical historical data to isolate which one is
+    responsible for average win < average loss."""
     tick = entry_price * Decimal("0.0001")  # rough tick approximation for backtest
     sl, tp = bot.calculate_initial_sl_tp(side, entry_price, tick, atr_pct)
+    round_trip_fee_pct = bot.FEE_RATE_PER_SIDE * Decimal("2") * Decimal("100")
+
+    if not bot.PARTIAL_TP_ENABLE:
+        return _simulate_single_stage(candles_15m, entry_idx, side, entry_price, sl, tp, tick, round_trip_fee_pct)
+
     _, tp_pct = bot.get_effective_sl_tp_pct(atr_pct)
     partial_pct = tp_pct * bot.PARTIAL_TP_RATIO
     partial_price = bot.calculate_target_price(side, entry_price, tick, partial_pct)
-
-    round_trip_fee_pct = bot.FEE_RATE_PER_SIDE * Decimal("2") * Decimal("100")
 
     fraction_remaining = Decimal("1")
     scaled_out = False

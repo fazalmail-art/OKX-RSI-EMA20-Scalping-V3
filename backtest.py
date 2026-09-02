@@ -42,6 +42,9 @@ import bot  # reuse the exact live logic — no reimplementation drift
 # ---- backtest window ----
 BARS_TO_FETCH = int(sys.argv[1]) if len(sys.argv) > 1 else 3000  # ~31 days of 15m bars
 HISTORY_PAGE_SIZE = 100
+REVERSE_MODE = len(sys.argv) > 2 and sys.argv[2].strip().lower() in ("reverse", "1", "true")
+if REVERSE_MODE:
+    print(">>> REVERSE MODE ON: every BUY signal is traded as SELL and vice versa <<<\n")
 
 
 def fetch_full_history(symbol, bar, total_bars):
@@ -336,6 +339,8 @@ def run():
                 i += 1
                 continue
             side = "buy" if sig["signal"] == "BUY" else "sell"
+            if REVERSE_MODE:
+                side = "sell" if side == "buy" else "buy"
             pnl_pct, reason = simulate_trade(symbol, c15, i, side, sig["entry"], sig["atr_pct"], sig["notional"])
             if pnl_pct is None:
                 i += 1

@@ -95,6 +95,56 @@ def session_info_at(ts_ms):
     return {"name": "OFF_SESSION", "priority": False, "active": False}
 
 
+def analyze_rsi_cross_at(candles_15m, idx):
+    """Reimplements bot.analyze_rsi_cross() on a fixed historical window
+    ending at `idx`, for backtesting the RSI(fast) x RSI(slow) crossover
+    strategy against real historical candles."""
+    need = bot.RSI_SLOW_PERIOD + 5
+    cs = candles_15m[max(0, idx - (need + 20)):idx + 1]
+    if len(cs) < need:
+        return None
+    values = [x["close"] for x in cs]
+    i = len(values) - 1
+    r_fast = bot.rsi(values, bot.RSI_FAST_PERIOD)
+    r_slow = bot.rsi(values, bot.RSI_SLOW_PERIOD)
+    if any(x is None for x in (r_fast[i], r_slow[i], r_fast[i - 1], r_slow[i - 1])):
+        return None
+    crossover = r_fast[i - 1] <= r_slow[i - 1] and r_fast[i] > r_slow[i]
+    crossunder = r_fast[i - 1] >= r_slow[i - 1] and r_fast[i] < r_slow[i]
+    if not crossover and not crossunder:
+        return None
+    signal = "BUY" if crossover else "SELL"
+
+    atr_v = bot.atr(cs)
+    atr_pct = (atr_v / values[i] * Decimal("100")) if atr_v else None
+    vol_mult = bot.volatility_size_multiplier(atr_pct)
+    target_notional = bot.MARGIN_USDT * vol_mult * bot.LEVERAGE
+    fee_ok, *_ = bot.fee_buffer_ok(target_notional, bot.RSI_TP_PERCENT)
+    if not fee_ok:
+        return None
+
+    return {"signal": signal, "atr_pct": atr_pct, "notional": target_notional, "entry": values[i]}
+
+
+def rsi_crossed_opposite(candles_15m, idx, side):
+    """Checks whether RSI(fast) has crossed back against `side`'s
+    direction as of bar `idx`, for simulating RSI-cross mode's early
+    exit-on-opposite-cross behavior."""
+    need = bot.RSI_SLOW_PERIOD + 5
+    cs = candles_15m[max(0, idx - (need + 20)):idx + 1]
+    if len(cs) < need:
+        return False
+    values = [x["close"] for x in cs]
+    i = len(values) - 1
+    r_fast = bot.rsi(values, bot.RSI_FAST_PERIOD)
+    r_slow = bot.rsi(values, bot.RSI_SLOW_PERIOD)
+    if any(x is None for x in (r_fast[i], r_slow[i], r_fast[i - 1], r_slow[i - 1])):
+        return False
+    crossunder = r_fast[i - 1] >= r_slow[i - 1] and r_fast[i] < r_slow[i]
+    crossover = r_fast[i - 1] <= r_slow[i - 1] and r_fast[i] > r_slow[i]
+    return (side == "buy" and crossunder) or (side == "sell" and crossover)
+
+
 def analyze_at(symbol, candles_15m, candles_1h, idx):
     """Reimplements bot.analyze() but operating on a fixed historical
     window ending at `idx` instead of live API calls, reusing every
@@ -236,6 +286,34 @@ def _simulate_single_stage(candles_15m, entry_idx, side, entry_price, sl, tp, ti
     return None, "STILL_OPEN_AT_DATA_END"
 
 
+def _simulate_rsi_cross_trade(candles_15m, entry_idx, side, entry_price):
+    """RSI-cross mode: fixed SL/TP (bot.RSI_SL_PERCENT / bot.RSI_TP_PERCENT),
+    single position size throughout, PLUS an early exit if RSI crosses
+    back against the position before SL/TP is hit (matching
+    bot.check_rsi_early_exit / the Pine Script's exitBuy/exitSell)."""
+    tick = entry_price * Decimal("0.0001")
+    sl, tp = bot.calculate_initial_sl_tp(side, entry_price, tick, None, bot.RSI_SL_PERCENT, bot.RSI_TP_PERCENT)
+    round_trip_fee_pct = bot.FEE_RATE_PER_SIDE * Decimal("2") * Decimal("100")
+
+    for j in range(entry_idx + 1, len(candles_15m)):
+        bar = candles_15m[j]
+        hi, lo = bar["high"], bar["low"]
+        hit_sl = (lo <= sl) if side == "buy" else (hi >= sl)
+        hit_tp = (hi >= tp) if side == "buy" else (lo <= tp)
+        if hit_sl:
+            move = (sl - entry_price) / entry_price if side == "buy" else (entry_price - sl) / entry_price
+            return move * Decimal("100") - round_trip_fee_pct, "SL"
+        if hit_tp:
+            move = (tp - entry_price) / entry_price if side == "buy" else (entry_price - tp) / entry_price
+            return move * Decimal("100") - round_trip_fee_pct, "TP"
+        if bot.RSI_EARLY_EXIT_ON_OPPOSITE_CROSS and rsi_crossed_opposite(candles_15m, j, side):
+            price = bar["close"]
+            move = (price - entry_price) / entry_price if side == "buy" else (entry_price - price) / entry_price
+            return move * Decimal("100") - round_trip_fee_pct, "RSI_EARLY_EXIT"
+
+    return None, "STILL_OPEN_AT_DATA_END"
+
+
 def simulate_trade(symbol, candles_15m, entry_idx, side, entry_price, atr_pct, notional):
     """Walks forward bar-by-bar using high/low to detect SL / partial-TP /
     final-TP touches, replicating the scale-out + breakeven + trailing +
@@ -249,7 +327,13 @@ def simulate_trade(symbol, candles_15m, entry_idx, side, entry_price, atr_pct, n
     triggered by BREAK_EVEN_TRIGGER_PCT profit rather than a partial
     fill event) -- this lets the two profit-taking designs be compared
     directly on identical historical data to isolate which one is
-    responsible for average win < average loss."""
+    responsible for average win < average loss.
+
+    When bot.STRATEGY_MODE == "rsi_cross", delegates to
+    _simulate_rsi_cross_trade() instead (fixed SL/TP + early exit)."""
+    if bot.STRATEGY_MODE == "rsi_cross":
+        return _simulate_rsi_cross_trade(candles_15m, entry_idx, side, entry_price)
+
     tick = entry_price * Decimal("0.0001")  # rough tick approximation for backtest
     sl, tp = bot.calculate_initial_sl_tp(side, entry_price, tick, atr_pct)
     round_trip_fee_pct = bot.FEE_RATE_PER_SIDE * Decimal("2") * Decimal("100")
@@ -317,13 +401,15 @@ def simulate_trade(symbol, candles_15m, entry_idx, side, entry_price, atr_pct, n
 
 
 def run():
+    print(f"STRATEGY_MODE={bot.STRATEGY_MODE}")
     print(f"Fetching ~{BARS_TO_FETCH} bars of {bot.BAR} history for: {bot.SYMBOLS}\n")
     all_results = []
     for symbol in bot.SYMBOLS:
         print(f"--- {symbol} ---")
         c15 = fetch_full_history(symbol, bot.BAR, BARS_TO_FETCH)
-        c1h = fetch_full_history(symbol, bot.TREND_BAR, BARS_TO_FETCH // 4 + 200)
-        if len(c15) < 60 or len(c1h) < 30:
+        c1h = fetch_full_history(symbol, bot.TREND_BAR, BARS_TO_FETCH // 4 + 200) if bot.STRATEGY_MODE != "rsi_cross" else []
+        min_1h_needed = 30 if bot.STRATEGY_MODE != "rsi_cross" else 0
+        if len(c15) < 60 or len(c1h) < min_1h_needed:
             print(f"  Not enough data fetched ({len(c15)} 15m bars), skipping.")
             continue
         print(f"  Got {len(c15)} bars ({datetime.fromtimestamp(c15[0]['ts']/1000)} -> {datetime.fromtimestamp(c15[-1]['ts']/1000)})")
@@ -334,7 +420,7 @@ def run():
             if last_close_ts is not None and (c15[i]["ts"] - last_close_ts) / 1000 < bot.SYMBOL_COOLDOWN_SECONDS:
                 i += 1
                 continue
-            sig = analyze_at(symbol, c15, c1h, i)
+            sig = analyze_rsi_cross_at(c15, i) if bot.STRATEGY_MODE == "rsi_cross" else analyze_at(symbol, c15, c1h, i)
             if sig is None:
                 i += 1
                 continue

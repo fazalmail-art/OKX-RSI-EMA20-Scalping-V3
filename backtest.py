@@ -45,6 +45,9 @@ HISTORY_PAGE_SIZE = 100
 REVERSE_MODE = len(sys.argv) > 2 and sys.argv[2].strip().lower() in ("reverse", "1", "true")
 if REVERSE_MODE:
     print(">>> REVERSE MODE ON: every BUY signal is traded as SELL and vice versa <<<\n")
+DISABLE_MACD_VETO = len(sys.argv) > 3 and sys.argv[3].strip().lower() in ("no_macd_veto", "1", "true")
+if DISABLE_MACD_VETO:
+    print(">>> MACD VETO DISABLED: signals no longer blocked by MACD-vs-signal-line check <<<\n")
 
 
 def fetch_full_history(symbol, bar, total_bars):
@@ -222,10 +225,11 @@ def analyze_at(symbol, candles_15m, candles_1h, idx):
         signal = "NONE"
     if trend15 == "bear" and signal == "BUY":
         signal = "NONE"
-    if signal == "BUY" and ml[i] < ms[i]:
-        signal = "NONE"
-    if signal == "SELL" and ml[i] > ms[i]:
-        signal = "NONE"
+    if not DISABLE_MACD_VETO:
+        if signal == "BUY" and ml[i] < ms[i]:
+            signal = "NONE"
+        if signal == "SELL" and ml[i] > ms[i]:
+            signal = "NONE"
 
     if signal == "NONE":
         return None
